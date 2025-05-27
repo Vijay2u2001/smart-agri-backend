@@ -15,6 +15,9 @@ const io = new Server(server, {
 app.use(cors());
 app.use(bodyParser.json());
 
+app.get('/connect', (req, res) => {
+  res.send('✅ Connected to Smart Agriculture Backend');
+});
 // ✅ Root route to confirm backend is live
 app.get('/', (req, res) => {
   res.send('🌱 Smart Agriculture Backend is Running ✅');
