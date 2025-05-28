@@ -33,6 +33,58 @@ app.get('/sensor-data/:plantType', (req, res) => {
     }
 });
 
+// Add this in your backend code (e.g., index.js or server.js)
+
+app.get('/historical-data/:plantType', (req, res) => {
+    const { plantType } = req.params;
+
+    // Dummy historical data for demo purposes
+    const historicalData = {
+        lettuce: [
+            { timestamp: '2025-05-28T10:00:00Z', temperature: 25, humidity: 60, waterLevel: 70 },
+            { timestamp: '2025-05-28T12:00:00Z', temperature: 26, humidity: 58, waterLevel: 68 },
+            // More historical entries can be added here
+        ],
+        spinach: [
+            { timestamp: '2025-05-28T10:00:00Z', temperature: 24, humidity: 65, waterLevel: 72 }
+        ]
+        // Add more plant types as needed
+    };
+
+    const data = historicalData[plantType];
+    if (data) {
+        res.json(data);
+    } else {
+        res.status(404).json({ error: `No historical data for ${plantType}` });
+    }
+});
+
+// Add this route to your backend (index.js or server.js)
+
+app.post('/control', (req, res) => {
+    const { deviceId, command, value } = req.body;
+
+    // Here you can handle the control commands
+    // For demo, let's just log it and emit it via Socket.IO
+    console.log(`Received control command for ${deviceId}:`, command, value);
+    
+    // Emit to connected clients/devices via socket.io
+    io.emit('controlCommand', { deviceId, command, value });
+
+    // Respond success
+    res.json({ message: `Command '${command}' sent to device ${deviceId}` });
+});
+
+app.get('/reservoir-levels', (req, res) => {
+    // Replace this with real data from your ESP32/IoT system
+    const reservoirData = {
+        waterLevel: 75,   // e.g., percentage or cm
+        nutrientLevel: 60 // e.g., percentage or ppm
+    };
+
+    res.json(reservoirData);
+});
+
 // In-memory storage for sensor data
 let sensorData = {};
 
