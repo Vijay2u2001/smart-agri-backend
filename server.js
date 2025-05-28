@@ -23,6 +23,16 @@ app.get('/', (req, res) => {
   res.send('🌱 Smart Agriculture Backend is Running ✅');
 });
 
+app.get('/sensor-data/:plantType', (req, res) => {
+    const { plantType } = req.params;
+    const data = sensorData[plantType];  // Access data by plant type
+    if (data) {
+        res.json(data);
+    } else {
+        res.status(404).json({ error: 'No data found for ' + plantType });
+    }
+});
+
 // In-memory storage for sensor data
 let sensorData = {};
 
