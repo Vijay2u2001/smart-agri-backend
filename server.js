@@ -7,109 +7,125 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: "*"
-  }
+  cors: { origin: '*' }
 });
 
 app.use(cors());
 app.use(bodyParser.json());
 
-app.get('/connect', (req, res) => {
-  res.send('✅ Connected to Smart Agriculture Backend');
-});
-// ✅ Root route to confirm backend is live
+// In-memory database
+let sensorData = {}; // key: deviceId, value: latest sensor data
+let historicalData = {}; // key: plantType, value: array of historical entries
+
+// Optional: map deviceId to plantType
+const devicePlantMap = {
+  esp32_1: 'lettuce',
+  esp32_2: 'spinach'
+};
+
+// Root test route
 app.get('/', (req, res) => {
   res.send('🌱 Smart Agriculture Backend is Running ✅');
 });
 
-app.get('/sensor-data/:plantType', (req, res) => {
-    const { plantType } = req.params;
-    const data = sensorData[plantType];  // Access data by plant type
-    if (data) {
-        res.json(data);
-    } else {
-        res.status(404).json({ error: 'No data found for ' + plantType });
-    }
+// Ping route
+app.get('/connect', (req, res) => {
+  res.send('✅ Connected to Smart Agriculture Backend');
 });
 
-// Add this in your backend code (e.g., index.js or server.js)
-
-app.get('/historical-data/:plantType', (req, res) => {
-    const { plantType } = req.params;
-
-    // Dummy historical data for demo purposes
-    const historicalData = {
-        lettuce: [
-            { timestamp: '2025-05-28T10:00:00Z', temperature: 25, humidity: 60, waterLevel: 70 },
-            { timestamp: '2025-05-28T12:00:00Z', temperature: 26, humidity: 58, waterLevel: 68 },
-            // More historical entries can be added here
-        ],
-        spinach: [
-            { timestamp: '2025-05-28T10:00:00Z', temperature: 24, humidity: 65, waterLevel: 72 }
-        ]
-        // Add more plant types as needed
-    };
-
-    const data = historicalData[plantType];
-    if (data) {
-        res.json(data);
-    } else {
-        res.status(404).json({ error: `No historical data for ${plantType}` });
-    }
-});
-
-// Add this route to your backend (index.js or server.js)
-
-app.post('/control', (req, res) => {
-    const { deviceId, command, value } = req.body;
-
-    // Here you can handle the control commands
-    // For demo, let's just log it and emit it via Socket.IO
-    console.log(`Received control command for ${deviceId}:`, command, value);
-    
-    // Emit to connected clients/devices via socket.io
-    io.emit('controlCommand', { deviceId, command, value });
-
-    // Respond success
-    res.json({ message: `Command '${command}' sent to device ${deviceId}` });
-});
-
-app.get('/reservoir-levels', (req, res) => {
-    // Replace this with real data from your ESP32/IoT system
-    const reservoirData = {
-        waterLevel: 75,   // e.g., percentage or cm
-        nutrientLevel: 60 // e.g., percentage or ppm
-    };
-
-    res.json(reservoirData);
-});
-
-// In-memory storage for sensor data
-let sensorData = {};
-
-// ✅ ESP32 sends data here
+// Update route from ESP32
 app.post('/update', (req, res) => {
   const { deviceId, data } = req.body;
 
   if (!deviceId || !data) {
-    return res.status(400).send('Missing deviceId or data');
+    return res.status(400).json({ error: 'Missing deviceId or data' });
   }
 
+  // Store live data
   sensorData[deviceId] = data;
 
-  // Broadcast update to all connected frontend clients
+  // Store historical data by plant type
+  const plantType = devicePlantMap[deviceId] || 'unknown';
+  const timestamped = { ...data, timestamp: new Date().toISOString() };
+
+  if (!historicalData[plantType]) {
+    historicalData[plantType] = [];
+  }
+  historicalData[plantType].push(timestamped);
+
+  // Limit to last 100 entries (optional)
+  if (historicalData[plantType].length > 100) {
+    historicalData[plantType].shift();
+  }
+
+  // Emit via WebSocket
   io.emit('dataUpdate', { deviceId, data });
 
   res.sendStatus(200);
 });
 
-// ✅ Frontend fetches data here
+// Frontend fetches all live data
 app.get('/data', (req, res) => {
   res.json(sensorData);
 });
 
-// ✅ Frontend real-time updates with Socket.IO
+// Get live sensor data by plant type
+app.get('/sensor-data/:plantType', (req, res) => {
+  const { plantType } = req.params;
+  const devices = Object.entries(devicePlantMap)
+    .filter(([_, pt]) => pt === plantType)
+    .map(([id]) => id);
+
+  const data = {};
+  devices.forEach((id) => {
+    if (sensorData[id]) {
+      data[id] = sensorData[id];
+    }
+  });
+
+  if (Object.keys(data).length > 0) {
+    res.json(data);
+  } else {
+    res.status(404).json({ error: 'No data found for ' + plantType });
+  }
+});
+
+// Get historical sensor data
+app.get('/historical-data/:plantType', (req, res) => {
+  const { plantType } = req.params;
+  const data = historicalData[plantType];
+  if (data) {
+    res.json(data);
+  } else {
+    res.status(404).json({ error: `No historical data for ${plantType}` });
+  }
+});
+
+// Handle control commands (e.g., turn on pump from frontend)
+app.post('/control', (req, res) => {
+  const { deviceId, command, value } = req.body;
+
+  if (!deviceId || !command) {
+    return res.status(400).json({ error: 'Missing deviceId or command' });
+  }
+
+  console.log(`🔧 Control command for ${deviceId}: ${command} = ${value}`);
+
+  io.emit('controlCommand', { deviceId, command, value });
+
+  res.json({ message: `Command '${command}' sent to device ${deviceId}` });
+});
+
+// Dummy reservoir endpoint
+app.get('/reservoir-levels', (req, res) => {
+  const reservoirData = {
+    waterLevel: 75,
+    nutrientLevel: 60
+  };
+  res.json(reservoirData);
+});
+
+// WebSocket connection
 io.on('connection', (socket) => {
   console.log('📡 Frontend connected via WebSocket');
   socket.emit('initData', sensorData);
@@ -119,6 +135,7 @@ io.on('connection', (socket) => {
   });
 });
 
+// Start the server
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
