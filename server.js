@@ -90,6 +90,37 @@ app.get('/sensor-data/:plantType', (req, res) => {
   }
 });
 
+// Track water usage
+let waterUsage = {};
+
+app.post('/update', (req, res) => {
+  // ... existing code ...
+  
+  // Track water level changes
+  if (data.waterLevelPercent !== undefined) {
+    const today = new Date().toISOString().split('T')[0];
+    if (!waterUsage[today]) {
+      waterUsage[today] = { 
+        startLevel: data.waterLevelPercent,
+        currentLevel: data.waterLevelPercent,
+        usage: 0 
+      };
+    } else {
+      waterUsage[today].currentLevel = data.waterLevelPercent;
+      // Calculate usage based on your tank size
+      const tankSize = 100; // in liters, adjust to your actual tank size
+      waterUsage[today].usage = 
+        (waterUsage[today].startLevel - waterUsage[today].currentLevel) * tankSize / 100;
+    }
+  }
+  
+  // ... rest of your code ...
+});
+
+// Add new endpoint for water usage
+app.get('/water-usage', (req, res) => {
+  res.json(waterUsage);
+});
 // Get historical sensor data
 app.get('/historical-data/:plantType', (req, res) => {
   const { plantType } = req.params;
