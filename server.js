@@ -156,6 +156,30 @@ app.get('/reservoir-levels', (req, res) => {
   res.json(reservoirData);
 });
 
+// Add this with your other endpoints
+let pendingCommands = {};
+
+app.post('/command', (req, res) => {
+  const { deviceId, command, value } = req.body;
+  
+  if (!pendingCommands[deviceId]) {
+    pendingCommands[deviceId] = [];
+  }
+  
+  pendingCommands[deviceId].push({ command, value, timestamp: Date.now() });
+  res.sendStatus(200);
+});
+
+app.get('/get-commands/:deviceId', (req, res) => {
+  const { deviceId } = req.params;
+  const commands = pendingCommands[deviceId] || [];
+  
+  // Clear retrieved commands
+  pendingCommands[deviceId] = [];
+  
+  res.json(commands);
+});
+
 // WebSocket connection
 io.on('connection', (socket) => {
   console.log('📡 Frontend connected via WebSocket');
