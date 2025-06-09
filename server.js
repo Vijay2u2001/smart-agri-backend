@@ -1,3 +1,5 @@
+require('dotenv').config(); // Load env vars from .env (for local development)
+
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -7,33 +9,35 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' }
+  cors: {
+    origin: process.env.FRONTEND_URL || '*', // Use environment variable or fallback
+    methods: ['GET', 'POST'],
+  }
 });
 
 app.use(cors());
 app.use(bodyParser.json());
 
-// In-memory database
-let sensorData = {}; // key: deviceId, value: latest sensor data
-let historicalData = {}; // key: plantType, value: array of historical entries
+// In-memory databases
+let sensorData = {}; // key: deviceId
+let historicalData = {}; // key: plantType
+let waterUsage = {};     // key: date
+let pendingCommands = {}; // key: deviceId
 
-// Optional: map deviceId to plantType
 const devicePlantMap = {
   esp32_1: 'lettuce',
   esp32_2: 'spinach'
 };
 
-// Root test route
+// Routes
 app.get('/', (req, res) => {
   res.send('🌱 Smart Agriculture Backend is Running ✅');
 });
 
-// Ping route
 app.get('/connect', (req, res) => {
   res.send('✅ Connected to Smart Agriculture Backend');
 });
 
-// Update route from ESP32
 app.post('/update', (req, res) => {
   const { deviceId, data } = req.body;
 
@@ -41,10 +45,10 @@ app.post('/update', (req, res) => {
     return res.status(400).json({ error: 'Missing deviceId or data' });
   }
 
-  // Store live data
+  // Store latest data
   sensorData[deviceId] = data;
 
-  // Store historical data by plant type
+  // Historical storage
   const plantType = devicePlantMap[deviceId] || 'unknown';
   const timestamped = { ...data, timestamp: new Date().toISOString() };
 
@@ -52,24 +56,36 @@ app.post('/update', (req, res) => {
     historicalData[plantType] = [];
   }
   historicalData[plantType].push(timestamped);
-
-  // Limit to last 100 entries (optional)
   if (historicalData[plantType].length > 100) {
     historicalData[plantType].shift();
   }
 
-  // Emit via WebSocket
-  io.emit('dataUpdate', { deviceId, data });
+  // Water usage tracking
+  if (data.waterLevelPercent !== undefined) {
+    const today = new Date().toISOString().split('T')[0];
+    if (!waterUsage[today]) {
+      waterUsage[today] = {
+        startLevel: data.waterLevelPercent,
+        currentLevel: data.waterLevelPercent,
+        usage: 0
+      };
+    } else {
+      waterUsage[today].currentLevel = data.waterLevelPercent;
+      const tankSize = 100; // Adjust to your actual tank size
+      waterUsage[today].usage =
+        (waterUsage[today].startLevel - waterUsage[today].currentLevel) * tankSize / 100;
+    }
+  }
 
+  // Emit update via WebSocket
+  io.emit('dataUpdate', { deviceId, data });
   res.sendStatus(200);
 });
 
-// Frontend fetches all live data
 app.get('/data', (req, res) => {
   res.json(sensorData);
 });
 
-// Get live sensor data by plant type
 app.get('/sensor-data/:plantType', (req, res) => {
   const { plantType } = req.params;
   const devices = Object.entries(devicePlantMap)
@@ -90,38 +106,6 @@ app.get('/sensor-data/:plantType', (req, res) => {
   }
 });
 
-// Track water usage
-let waterUsage = {};
-
-app.post('/update', (req, res) => {
-  // ... existing code ...
-  
-  // Track water level changes
-  if (data.waterLevelPercent !== undefined) {
-    const today = new Date().toISOString().split('T')[0];
-    if (!waterUsage[today]) {
-      waterUsage[today] = { 
-        startLevel: data.waterLevelPercent,
-        currentLevel: data.waterLevelPercent,
-        usage: 0 
-      };
-    } else {
-      waterUsage[today].currentLevel = data.waterLevelPercent;
-      // Calculate usage based on your tank size
-      const tankSize = 100; // in liters, adjust to your actual tank size
-      waterUsage[today].usage = 
-        (waterUsage[today].startLevel - waterUsage[today].currentLevel) * tankSize / 100;
-    }
-  }
-  
-  // ... rest of your code ...
-});
-
-// Add new endpoint for water usage
-app.get('/water-usage', (req, res) => {
-  res.json(waterUsage);
-});
-// Get historical sensor data
 app.get('/historical-data/:plantType', (req, res) => {
   const { plantType } = req.params;
   const data = historicalData[plantType];
@@ -132,7 +116,17 @@ app.get('/historical-data/:plantType', (req, res) => {
   }
 });
 
-// Handle control commands (e.g., turn on pump from frontend)
+app.get('/water-usage', (req, res) => {
+  res.json(waterUsage);
+});
+
+app.get('/reservoir-levels', (req, res) => {
+  res.json({
+    waterLevel: 75,
+    nutrientLevel: 60
+  });
+});
+
 app.post('/control', (req, res) => {
   const { deviceId, command, value } = req.body;
 
@@ -141,46 +135,35 @@ app.post('/control', (req, res) => {
   }
 
   console.log(`🔧 Control command for ${deviceId}: ${command} = ${value}`);
-
   io.emit('controlCommand', { deviceId, command, value });
 
   res.json({ message: `Command '${command}' sent to device ${deviceId}` });
 });
 
-// Dummy reservoir endpoint
-app.get('/reservoir-levels', (req, res) => {
-  const reservoirData = {
-    waterLevel: 75,
-    nutrientLevel: 60
-  };
-  res.json(reservoirData);
-});
-
-// Add this with your other endpoints
-let pendingCommands = {};
-
 app.post('/command', (req, res) => {
   const { deviceId, command, value } = req.body;
-  
+
   if (!pendingCommands[deviceId]) {
     pendingCommands[deviceId] = [];
   }
-  
-  pendingCommands[deviceId].push({ command, value, timestamp: Date.now() });
+
+  pendingCommands[deviceId].push({
+    command,
+    value,
+    timestamp: Date.now()
+  });
+
   res.sendStatus(200);
 });
 
 app.get('/get-commands/:deviceId', (req, res) => {
   const { deviceId } = req.params;
   const commands = pendingCommands[deviceId] || [];
-  
-  // Clear retrieved commands
-  pendingCommands[deviceId] = [];
-  
+  pendingCommands[deviceId] = []; // clear after sending
   res.json(commands);
 });
 
-// WebSocket connection
+// WebSocket setup
 io.on('connection', (socket) => {
   console.log('📡 Frontend connected via WebSocket');
   socket.emit('initData', sensorData);
@@ -190,7 +173,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// Start the server
+// Server start
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
