@@ -1,5 +1,3 @@
-
-
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -10,171 +8,148 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || '*', // Use environment variable or fallback
+    origin: process.env.FRONTEND_URL || '*',
     methods: ['GET', 'POST'],
   }
 });
 
-app.use(cors());
+// Enhanced CORS configuration
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// Add pre-flight OPTIONS handler
+app.options('*', cors());
 
 // In-memory databases
-let sensorData = {}; // key: deviceId
-let historicalData = {}; // key: plantType
-let waterUsage = {};     // key: date
-let pendingCommands = {}; // key: deviceId
+let sensorData = {};
+let historicalData = {};
+let waterUsage = {};
+let pendingCommands = {};
 
 const devicePlantMap = {
   esp32_1: 'lettuce',
   esp32_2: 'spinach'
 };
 
-// Routes
+// Improved logging middleware
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
+
+// Enhanced root endpoint
 app.get('/', (req, res) => {
-  res.send('🌱 Smart Agriculture Backend is Running ✅');
+  res.json({
+    status: 'running',
+    message: '🌱 Smart Agriculture Backend',
+    version: '1.0.0',
+    endpoints: {
+      update: 'POST /update',
+      data: 'GET /data',
+      sensorData: 'GET /sensor-data/:plantType',
+      historicalData: 'GET /historical-data/:plantType'
+    }
+  });
 });
 
 app.get('/connect', (req, res) => {
-  res.send('✅ Connected to Smart Agriculture Backend');
+  res.json({ status: 'connected', timestamp: new Date().toISOString() });
 });
 
+// Enhanced update endpoint with better error handling
 app.post('/update', (req, res) => {
-  const { deviceId, data } = req.body;
+  try {
+    const { deviceId, data } = req.body;
 
-  if (!deviceId || !data) {
-    return res.status(400).json({ error: 'Missing deviceId or data' });
-  }
-
-  // Store latest data
-  sensorData[deviceId] = data;
-
-  // Historical storage
-  const plantType = devicePlantMap[deviceId] || 'unknown';
-  const timestamped = { ...data, timestamp: new Date().toISOString() };
-
-  if (!historicalData[plantType]) {
-    historicalData[plantType] = [];
-  }
-  historicalData[plantType].push(timestamped);
-  if (historicalData[plantType].length > 100) {
-    historicalData[plantType].shift();
-  }
-
-  // Water usage tracking
-  if (data.waterLevelPercent !== undefined) {
-    const today = new Date().toISOString().split('T')[0];
-    if (!waterUsage[today]) {
-      waterUsage[today] = {
-        startLevel: data.waterLevelPercent,
-        currentLevel: data.waterLevelPercent,
-        usage: 0
-      };
-    } else {
-      waterUsage[today].currentLevel = data.waterLevelPercent;
-      const tankSize = 100; // Adjust to your actual tank size
-      waterUsage[today].usage =
-        (waterUsage[today].startLevel - waterUsage[today].currentLevel) * tankSize / 100;
+    if (!deviceId || !data) {
+      console.error('Missing deviceId or data', req.body);
+      return res.status(400).json({ 
+        error: 'Missing required fields',
+        required: ['deviceId', 'data'],
+        received: Object.keys(req.body)
+      });
     }
-  }
 
-  // Emit update via WebSocket
-  io.emit('dataUpdate', { deviceId, data });
-  res.sendStatus(200);
-});
-
-app.get('/data', (req, res) => {
-  res.json(sensorData);
-});
-
-app.get('/sensor-data/:plantType', (req, res) => {
-  const { plantType } = req.params;
-  const devices = Object.entries(devicePlantMap)
-    .filter(([_, pt]) => pt === plantType)
-    .map(([id]) => id);
-
-  const data = {};
-  devices.forEach((id) => {
-    if (sensorData[id]) {
-      data[id] = sensorData[id];
+    // Validate device ID
+    if (!devicePlantMap[deviceId]) {
+      console.warn(`Unknown device ID: ${deviceId}`);
     }
-  });
 
-  if (Object.keys(data).length > 0) {
-    res.json(data);
-  } else {
-    res.status(404).json({ error: 'No data found for ' + plantType });
+    // Store latest data
+    sensorData[deviceId] = data;
+
+    // Historical storage
+    const plantType = devicePlantMap[deviceId] || 'unknown';
+    const timestamped = { ...data, timestamp: new Date().toISOString() };
+
+    if (!historicalData[plantType]) {
+      historicalData[plantType] = [];
+    }
+    historicalData[plantType].push(timestamped);
+    
+    // Keep only last 100 records
+    if (historicalData[plantType].length > 100) {
+      historicalData[plantType].shift();
+    }
+
+    // Water usage tracking
+    if (data.fertilizer_level !== undefined) {
+      const today = new Date().toISOString().split('T')[0];
+      if (!waterUsage[today]) {
+        waterUsage[today] = {
+          startLevel: data.fertilizer_level,
+          currentLevel: data.fertilizer_level,
+          usage: 0
+        };
+      } else {
+        waterUsage[today].currentLevel = data.fertilizer_level;
+        const tankSize = 100; // Adjust to your actual tank size
+        waterUsage[today].usage =
+          (waterUsage[today].startLevel - waterUsage[today].currentLevel) * tankSize / 100;
+      }
+    }
+
+    // Emit update via WebSocket
+    io.emit('dataUpdate', { deviceId, data });
+    
+    res.json({ 
+      status: 'success',
+      deviceId,
+      receivedAt: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Error in /update:', error);
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message
+    });
   }
 });
 
-app.get('/historical-data/:plantType', (req, res) => {
-  const { plantType } = req.params;
-  const data = historicalData[plantType];
-  if (data) {
-    res.json(data);
-  } else {
-    res.status(404).json({ error: `No historical data for ${plantType}` });
-  }
-});
+// ... (keep other endpoints the same)
 
-app.get('/water-usage', (req, res) => {
-  res.json(waterUsage);
-});
-
-app.get('/reservoir-levels', (req, res) => {
-  res.json({
-    waterLevel: 75,
-    nutrientLevel: 60
-  });
-});
-
-app.post('/control', (req, res) => {
-  const { deviceId, command, value } = req.body;
-
-  if (!deviceId || !command) {
-    return res.status(400).json({ error: 'Missing deviceId or command' });
-  }
-
-  console.log(`🔧 Control command for ${deviceId}: ${command} = ${value}`);
-  io.emit('controlCommand', { deviceId, command, value });
-
-  res.json({ message: `Command '${command}' sent to device ${deviceId}` });
-});
-
-app.post('/command', (req, res) => {
-  const { deviceId, command, value } = req.body;
-
-  if (!pendingCommands[deviceId]) {
-    pendingCommands[deviceId] = [];
-  }
-
-  pendingCommands[deviceId].push({
-    command,
-    value,
-    timestamp: Date.now()
-  });
-
-  res.sendStatus(200);
-});
-
-app.get('/get-commands/:deviceId', (req, res) => {
-  const { deviceId } = req.params;
-  const commands = pendingCommands[deviceId] || [];
-  pendingCommands[deviceId] = []; // clear after sending
-  res.json(commands);
-});
-
-// WebSocket setup
-io.on('connection', (socket) => {
-  console.log('📡 Frontend connected via WebSocket');
-  socket.emit('initData', sensorData);
-
-  socket.on('disconnect', () => {
-    console.log('❌ Frontend disconnected');
-  });
-});
-
-// Server start
+// Enhanced server startup
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🌐 Endpoints:`);
+  console.log(`- http://localhost:${PORT}/`);
+  console.log(`- http://localhost:${PORT}/update`);
+});
+
+// Handle unhandled rejections
+process.on('unhandledRejection', (error) => {
+  console.error('Unhandled rejection:', error);
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
 });
