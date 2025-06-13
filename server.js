@@ -170,6 +170,15 @@ app.get('/get-commands/:deviceId', (req, res) => {
         received: req.params
       });
     }
+   
+app.get('/update/command-status/:deviceId', (req, res) => {
+  const { deviceId } = req.params;
+  const commands = pendingCommands[deviceId] || [];
+  res.json({
+    pending: commands.filter(c => c.status === COMMAND_STATUS.PENDING),
+    completed: commands.filter(c => c.status === COMMAND_STATUS.COMPLETED)
+  });
+});
 
     // Update device connection status
     deviceStates[deviceId].connected = true;
