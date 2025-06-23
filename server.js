@@ -22,7 +22,6 @@ const io = new Server(server, {
   },
   pingInterval: 10000,
   pingTimeout: 5000,
-  path: '/ws' // Add this line to handle WebSocket connections at /ws endpoint
 });
 
 const corsOptions = {
@@ -63,10 +62,9 @@ let waterUsage = {};
 let pendingCommands = {};
 let deviceStates = {};
 
-// Updated device mapping to match frontend expectations
 const devicePlantMap = {
-  esp32_1: 'level1',  // Changed from 'lettuce'
-  esp32_2: 'level2'   // Changed from 'spinach'
+  esp32_1: 'level1',
+  esp32_2: 'level2',
 };
 
 const initializeDeviceStates = () => {
@@ -93,7 +91,43 @@ app.use((req, res, next) => {
   next();
 });
 
-// ... [Keep all your existing routes unchanged until the send-command endpoint] ...
+app.get('/', (req, res) => {
+  res.json({
+    status: 'running',
+    message: '🌱 Smart Agriculture Backend',
+    version: '2.3.0',
+    frontend: 'https://smart-agriculture-box.netlify.app',
+    endpoints: {
+      update: 'POST /update',
+      data: 'GET /data',
+      sensorData: 'GET /sensor-data/:plantType',
+      historicalData: 'GET /historical-data/:plantType',
+      sendCommand: 'POST /send-command',
+      getCommands: 'GET /get-commands/:deviceId',
+      deviceStatus: 'GET /device-status/:deviceId',
+      connect: 'GET /connect',
+      debug: {
+        connections: '/debug/connections',
+        clients: '/debug/ws-clients',
+        devices: '/debug/devices',
+      },
+    },
+  });
+});
+
+app.get('/device-status/:deviceId', (req, res) => {
+  const { deviceId } = req.params;
+  if (!deviceStates[deviceId]) {
+    return res.status(404).json({
+      error: 'Device not found',
+      availableDevices: Object.keys(deviceStates),
+    });
+  }
+  res.json({
+    ...deviceStates[deviceId],
+    plantType: devicePlantMap[deviceId] || 'unknown',
+  });
+});
 
 app.post('/send-command', (req, res) => {
   try {
@@ -130,7 +164,6 @@ app.post('/send-command', (req, res) => {
     }
     pendingCommands[deviceId].push(commandObj);
 
-    // Update device states
     if (command === COMMAND_TYPES.LIGHT_ON || command === COMMAND_TYPES.LED) {
       deviceStates[deviceId].light = true;
     } else if (command === COMMAND_TYPES.LIGHT_OFF) {
@@ -143,15 +176,12 @@ app.post('/send-command', (req, res) => {
 
     console.log(`New command queued for ${deviceId}:`, commandObj);
 
-    // Send command to the specific device via WebSocket
+    io.emit('commandIssued', commandObj);
     io.to(`device_${deviceId}`).emit('executeCommand', {
       command: command,
       value: commandObj.value,
-      duration: commandObj.duration,
-      commandId: commandObj.id
+      duration: commandObj.duration
     });
-
-    io.emit('commandIssued', commandObj);
 
     const timeout = setTimeout(() => {
       const cmdIndex = pendingCommands[deviceId].findIndex((c) => c.id === commandObj.id);
@@ -179,69 +209,50 @@ app.post('/send-command', (req, res) => {
   }
 });
 
-// ... [Keep all your existing routes unchanged] ...
-
 io.on('connection', (socket) => {
   const clientIp = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
   console.log(`📡 New client connected [${socket.id}] from ${clientIp}`);
 
-  // Handle ESP32 device connections
+  socket.on('authenticate', (deviceId) => {
+    if (devicePlantMap[deviceId]) {
+      socket.join(deviceId);
+      console.log(`[${socket.id}] Joined device room: ${deviceId}`);
+    }
+  });
+
   socket.on('deviceConnect', (deviceId) => {
     if (devicePlantMap[deviceId]) {
       socket.join(`device_${deviceId}`);
       deviceStates[deviceId].connected = true;
-      deviceStates[deviceId].lastSeen = new Date().toISOString();
       console.log(`Device ${deviceId} connected`);
-      
-      // Send pending commands to the device upon connection
-      if (pendingCommands[deviceId] && pendingCommands[deviceId].length > 0) {
-        const pending = pendingCommands[deviceId].filter(cmd => cmd.status === COMMAND_STATUS.PENDING);
-        socket.emit('pendingCommands', pending);
-        console.log(`Sent ${pending.length} pending commands to ${deviceId}`);
-      }
     }
   });
 
-  // Handle command completion notifications from devices
-  socket.on('commandCompleted', (data) => {
-    const { commandId, deviceId, success } = data;
-    if (pendingCommands[deviceId]) {
-      const cmdIndex = pendingCommands[deviceId].findIndex(cmd => cmd.id === commandId);
-      if (cmdIndex !== -1) {
-        pendingCommands[deviceId][cmdIndex].status = success ? COMMAND_STATUS.COMPLETED : COMMAND_STATUS.FAILED;
-        pendingCommands[deviceId][cmdIndex].completedAt = new Date().toISOString();
-        
-        // Clear the timeout
-        if (pendingCommands[deviceId][cmdIndex].timeoutRef) {
-          clearTimeout(pendingCommands[deviceId][cmdIndex].timeoutRef);
-        }
-
-        io.emit('commandUpdate', pendingCommands[deviceId][cmdIndex]);
-        console.log(`Command ${commandId} marked as ${pendingCommands[deviceId][cmdIndex].status}`);
-      }
-    }
+  socket.on('sendToDevice', (data) => {
+    const { deviceId, command } = data;
+    io.to(`device_${deviceId}`).emit('command', command);
   });
 
-  // Handle sensor data updates from devices
-  socket.on('sensorData', (data) => {
-    const { deviceId, sensors } = data;
-    if (devicePlantMap[deviceId]) {
-      sensorData[deviceId] = sensors;
-      deviceStates[deviceId].lastUpdated = new Date().toISOString();
-      deviceStates[deviceId].connected = true;
-      deviceStates[deviceId].lastSeen = new Date().toISOString();
-      
-      // Broadcast the update to all clients
-      io.emit('sensorUpdate', {
-        deviceId,
-        plantType: devicePlantMap[deviceId],
-        data: sensors,
-        timestamp: deviceStates[deviceId].lastUpdated
-      });
-    }
+  const initData = {
+    sensorData,
+    deviceStates,
+    pendingCommands: Object.keys(pendingCommands).reduce((acc, key) => {
+      acc[key] = pendingCommands[key].filter((cmd) => cmd.status === COMMAND_STATUS.PENDING);
+      return acc;
+    }, {}),
+    timestamp: new Date().toISOString(),
+  };
+
+  socket.emit('init', initData);
+  console.log(`[${socket.id}] Sent init data`);
+
+  socket.on('disconnect', (reason) => {
+    console.log(`❌ Client disconnected [${socket.id}]: ${reason}`);
   });
 
-  // ... [Keep the rest of your existing socket.io code] ...
+  socket.on('error', (error) => {
+    console.error(`[${socket.id}] Socket error:`, error);
+  });
 });
 
 const PORT = process.env.PORT || 4000;
