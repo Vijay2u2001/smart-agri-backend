@@ -63,8 +63,8 @@ let pendingCommands = {};
 let deviceStates = {};
 
 const devicePlantMap = {
-  esp32_1: 'level1',
-  esp32_2: 'level2',
+  esp32_1: 'lettuce',
+  esp32_2: 'spinach',
 };
 
 const initializeDeviceStates = () => {
@@ -84,7 +84,7 @@ initializeDeviceStates();
 
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${req.method} ${req.url}`);
+  console.log([${timestamp}] ${req.method} ${req.url});
   if (req.method === 'POST' && req.body) {
     console.log('Request Body:', JSON.stringify(req.body, null, 2));
   }
@@ -174,14 +174,9 @@ app.post('/send-command', (req, res) => {
       deviceStates[deviceId].lastNutrients = new Date().toISOString();
     }
 
-    console.log(`New command queued for ${deviceId}:`, commandObj);
+    console.log(New command queued for ${deviceId}:, commandObj);
 
     io.emit('commandIssued', commandObj);
-    io.to(`device_${deviceId}`).emit('executeCommand', {
-      command: command,
-      value: commandObj.value,
-      duration: commandObj.duration
-    });
 
     const timeout = setTimeout(() => {
       const cmdIndex = pendingCommands[deviceId].findIndex((c) => c.id === commandObj.id);
@@ -189,7 +184,7 @@ app.post('/send-command', (req, res) => {
         pendingCommands[deviceId][cmdIndex].status = COMMAND_STATUS.TIMEOUT;
         pendingCommands[deviceId][cmdIndex].timeoutAt = new Date().toISOString();
         io.emit('commandTimeout', pendingCommands[deviceId][cmdIndex]);
-        console.log(`Command ${commandObj.id} timed out`);
+        console.log(Command ${commandObj.id} timed out);
       }
     }, 5 * 60 * 1000);
 
@@ -209,28 +204,49 @@ app.post('/send-command', (req, res) => {
   }
 });
 
+app.get('/debug/connections', (req, res) => {
+  res.json({
+    activeSockets: io.engine.clientsCount,
+    connectedDevices: Object.keys(deviceStates).filter((id) => deviceStates[id].connected),
+    lastUpdates: Object.keys(sensorData).map((id) => ({
+      device: id,
+      plant: devicePlantMap[id] || 'unknown',
+      lastUpdate: deviceStates[id].lastUpdated,
+      data: sensorData[id],
+    })),
+  });
+});
+
+app.get('/debug/ws-clients', (req, res) => {
+  const clients = [];
+  io.sockets.sockets.forEach((socket) => {
+    clients.push({
+      id: socket.id,
+      connected: socket.connected,
+      handshake: {
+        headers: socket.handshake.headers,
+        query: socket.handshake.query,
+        time: socket.handshake.time,
+        address: socket.handshake.address,
+      },
+    });
+  });
+  res.json(clients);
+});
+
+app.get('/debug/devices', (req, res) => {
+  res.json(deviceStates);
+});
+
 io.on('connection', (socket) => {
   const clientIp = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
-  console.log(`📡 New client connected [${socket.id}] from ${clientIp}`);
+  console.log(📡 New client connected [${socket.id}] from ${clientIp});
 
   socket.on('authenticate', (deviceId) => {
     if (devicePlantMap[deviceId]) {
       socket.join(deviceId);
-      console.log(`[${socket.id}] Joined device room: ${deviceId}`);
+      console.log([${socket.id}] Joined device room: ${deviceId});
     }
-  });
-
-  socket.on('deviceConnect', (deviceId) => {
-    if (devicePlantMap[deviceId]) {
-      socket.join(`device_${deviceId}`);
-      deviceStates[deviceId].connected = true;
-      console.log(`Device ${deviceId} connected`);
-    }
-  });
-
-  socket.on('sendToDevice', (data) => {
-    const { deviceId, command } = data;
-    io.to(`device_${deviceId}`).emit('command', command);
   });
 
   const initData = {
@@ -244,18 +260,46 @@ io.on('connection', (socket) => {
   };
 
   socket.emit('init', initData);
-  console.log(`[${socket.id}] Sent init data`);
+  console.log([${socket.id}] Sent init data);
+
+  socket.on('requestCommand', (data) => {
+    try {
+      const { deviceId, command, value, duration } = data;
+
+      if (!deviceId || !command) {
+        return socket.emit('commandError', {
+          error: 'Missing deviceId or command',
+          received: data,
+        });
+      }
+
+      io.emit('commandRequested', {
+        deviceId,
+        command,
+        value,
+        duration: duration || 3000,
+        requestedBy: socket.id,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error([${socket.id}] Error in requestCommand:, error);
+      socket.emit('error', {
+        message: 'Failed to process command request',
+        error: error.message,
+      });
+    }
+  });
 
   socket.on('disconnect', (reason) => {
-    console.log(`❌ Client disconnected [${socket.id}]: ${reason}`);
+    console.log(❌ Client disconnected [${socket.id}]: ${reason});
   });
 
   socket.on('error', (error) => {
-    console.error(`[${socket.id}] Socket error:`, error);
+    console.error([${socket.id}] Socket error:, error);
   });
 });
 
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(🚀 Server running on port ${PORT});
 });
