@@ -22,6 +22,7 @@ const io = new Server(server, {
   },
   pingInterval: 10000,
   pingTimeout: 5000,
+  path: '/ws' // Add this line to handle WebSocket connections at /ws endpoint
 });
 
 const corsOptions = {
@@ -62,9 +63,10 @@ let waterUsage = {};
 let pendingCommands = {};
 let deviceStates = {};
 
+// Updated device mapping to match frontend expectations
 const devicePlantMap = {
-  esp32_1: 'lettuce',
-  esp32_2: 'spinach',
+  esp32_1: 'level1',  // Changed from 'lettuce'
+  esp32_2: 'level2'   // Changed from 'spinach'
 };
 
 const initializeDeviceStates = () => {
@@ -91,43 +93,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/', (req, res) => {
-  res.json({
-    status: 'running',
-    message: '🌱 Smart Agriculture Backend',
-    version: '2.3.0',
-    frontend: 'https://smart-agriculture-box.netlify.app',
-    endpoints: {
-      update: 'POST /update',
-      data: 'GET /data',
-      sensorData: 'GET /sensor-data/:plantType',
-      historicalData: 'GET /historical-data/:plantType',
-      sendCommand: 'POST /send-command',
-      getCommands: 'GET /get-commands/:deviceId',
-      deviceStatus: 'GET /device-status/:deviceId',
-      connect: 'GET /connect',
-      debug: {
-        connections: '/debug/connections',
-        clients: '/debug/ws-clients',
-        devices: '/debug/devices',
-      },
-    },
-  });
-});
-
-app.get('/device-status/:deviceId', (req, res) => {
-  const { deviceId } = req.params;
-  if (!deviceStates[deviceId]) {
-    return res.status(404).json({
-      error: 'Device not found',
-      availableDevices: Object.keys(deviceStates),
-    });
-  }
-  res.json({
-    ...deviceStates[deviceId],
-    plantType: devicePlantMap[deviceId] || 'unknown',
-  });
-});
+// ... [Keep all your existing routes unchanged until the send-command endpoint] ...
 
 app.post('/send-command', (req, res) => {
   try {
@@ -164,6 +130,7 @@ app.post('/send-command', (req, res) => {
     }
     pendingCommands[deviceId].push(commandObj);
 
+    // Update device states
     if (command === COMMAND_TYPES.LIGHT_ON || command === COMMAND_TYPES.LED) {
       deviceStates[deviceId].light = true;
     } else if (command === COMMAND_TYPES.LIGHT_OFF) {
@@ -175,6 +142,14 @@ app.post('/send-command', (req, res) => {
     }
 
     console.log(`New command queued for ${deviceId}:`, commandObj);
+
+    // Send command to the specific device via WebSocket
+    io.to(`device_${deviceId}`).emit('executeCommand', {
+      command: command,
+      value: commandObj.value,
+      duration: commandObj.duration,
+      commandId: commandObj.id
+    });
 
     io.emit('commandIssued', commandObj);
 
@@ -204,99 +179,69 @@ app.post('/send-command', (req, res) => {
   }
 });
 
-app.get('/debug/connections', (req, res) => {
-  res.json({
-    activeSockets: io.engine.clientsCount,
-    connectedDevices: Object.keys(deviceStates).filter((id) => deviceStates[id].connected),
-    lastUpdates: Object.keys(sensorData).map((id) => ({
-      device: id,
-      plant: devicePlantMap[id] || 'unknown',
-      lastUpdate: deviceStates[id].lastUpdated,
-      data: sensorData[id],
-    })),
-  });
-});
-
-app.get('/debug/ws-clients', (req, res) => {
-  const clients = [];
-  io.sockets.sockets.forEach((socket) => {
-    clients.push({
-      id: socket.id,
-      connected: socket.connected,
-      handshake: {
-        headers: socket.handshake.headers,
-        query: socket.handshake.query,
-        time: socket.handshake.time,
-        address: socket.handshake.address,
-      },
-    });
-  });
-  res.json(clients);
-});
-
-app.get('/debug/devices', (req, res) => {
-  res.json(deviceStates);
-});
+// ... [Keep all your existing routes unchanged] ...
 
 io.on('connection', (socket) => {
   const clientIp = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
   console.log(`📡 New client connected [${socket.id}] from ${clientIp}`);
 
-  socket.on('authenticate', (deviceId) => {
+  // Handle ESP32 device connections
+  socket.on('deviceConnect', (deviceId) => {
     if (devicePlantMap[deviceId]) {
-      socket.join(deviceId);
-      console.log(`[${socket.id}] Joined device room: ${deviceId}`);
-    }
-  });
-
-  const initData = {
-    sensorData,
-    deviceStates,
-    pendingCommands: Object.keys(pendingCommands).reduce((acc, key) => {
-      acc[key] = pendingCommands[key].filter((cmd) => cmd.status === COMMAND_STATUS.PENDING);
-      return acc;
-    }, {}),
-    timestamp: new Date().toISOString(),
-  };
-
-  socket.emit('init', initData);
-  console.log(`[${socket.id}] Sent init data`);
-
-  socket.on('requestCommand', (data) => {
-    try {
-      const { deviceId, command, value, duration } = data;
-
-      if (!deviceId || !command) {
-        return socket.emit('commandError', {
-          error: 'Missing deviceId or command',
-          received: data,
-        });
+      socket.join(`device_${deviceId}`);
+      deviceStates[deviceId].connected = true;
+      deviceStates[deviceId].lastSeen = new Date().toISOString();
+      console.log(`Device ${deviceId} connected`);
+      
+      // Send pending commands to the device upon connection
+      if (pendingCommands[deviceId] && pendingCommands[deviceId].length > 0) {
+        const pending = pendingCommands[deviceId].filter(cmd => cmd.status === COMMAND_STATUS.PENDING);
+        socket.emit('pendingCommands', pending);
+        console.log(`Sent ${pending.length} pending commands to ${deviceId}`);
       }
+    }
+  });
 
-      io.emit('commandRequested', {
+  // Handle command completion notifications from devices
+  socket.on('commandCompleted', (data) => {
+    const { commandId, deviceId, success } = data;
+    if (pendingCommands[deviceId]) {
+      const cmdIndex = pendingCommands[deviceId].findIndex(cmd => cmd.id === commandId);
+      if (cmdIndex !== -1) {
+        pendingCommands[deviceId][cmdIndex].status = success ? COMMAND_STATUS.COMPLETED : COMMAND_STATUS.FAILED;
+        pendingCommands[deviceId][cmdIndex].completedAt = new Date().toISOString();
+        
+        // Clear the timeout
+        if (pendingCommands[deviceId][cmdIndex].timeoutRef) {
+          clearTimeout(pendingCommands[deviceId][cmdIndex].timeoutRef);
+        }
+
+        io.emit('commandUpdate', pendingCommands[deviceId][cmdIndex]);
+        console.log(`Command ${commandId} marked as ${pendingCommands[deviceId][cmdIndex].status}`);
+      }
+    }
+  });
+
+  // Handle sensor data updates from devices
+  socket.on('sensorData', (data) => {
+    const { deviceId, sensors } = data;
+    if (devicePlantMap[deviceId]) {
+      sensorData[deviceId] = sensors;
+      deviceStates[deviceId].lastUpdated = new Date().toISOString();
+      deviceStates[deviceId].connected = true;
+      deviceStates[deviceId].lastSeen = new Date().toISOString();
+      
+      // Broadcast the update to all clients
+      io.emit('sensorUpdate', {
         deviceId,
-        command,
-        value,
-        duration: duration || 3000,
-        requestedBy: socket.id,
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error) {
-      console.error(`[${socket.id}] Error in requestCommand:`, error);
-      socket.emit('error', {
-        message: 'Failed to process command request',
-        error: error.message,
+        plantType: devicePlantMap[deviceId],
+        data: sensors,
+        timestamp: deviceStates[deviceId].lastUpdated
       });
     }
   });
 
-  socket.on('disconnect', (reason) => {
-    console.log(`❌ Client disconnected [${socket.id}]: ${reason}`);
-  });
-
-  socket.on('error', (error) => {
-    console.error(`[${socket.id}] Socket error:`, error);
-  });
+  // ... [Keep the rest of your existing socket.io code] ...
 });
 
 const PORT = process.env.PORT || 4000;
